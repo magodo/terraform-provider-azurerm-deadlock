@@ -6,7 +6,9 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/bflad/tfproviderlint/helper/astutils"
 	"golang.org/x/tools/go/ast/astutil"
@@ -18,21 +20,64 @@ const (
 	lockModulePath = "internal/locks"
 )
 
-type Locksites map[*ast.FuncDecl][]Locksite
+type Locksites map[Pos][]Locksite
 
 func (ls Locksites) AddLocksite(site Locksite) {
-	if _, ok := ls[site.EnclosingFunc]; !ok {
-		ls[site.EnclosingFunc] = []Locksite{}
+	if _, ok := ls[site.EnclosingFuncPos]; !ok {
+		ls[site.EnclosingFuncPos] = []Locksite{}
 	}
-	ls[site.EnclosingFunc] = append(ls[site.EnclosingFunc], site)
+	ls[site.EnclosingFuncPos] = append(ls[site.EnclosingFuncPos], site)
 }
 
+type Pos string
+
+type Poses []Pos
+
+func (ps Poses) Len() int           { return len(ps) }
+func (ps Poses) Less(i, j int) bool { return ps[i] < ps[j] }
+func (ps Poses) Swap(i, j int)      { ps[i], ps[j] = ps[j], ps[i] }
+
 type Locksite struct {
-	ResourceType  string
-	EnclosingFunc *ast.FuncDecl
-	Pkg           *packages.Package
+	ResourceType     string
+	EnclosingFuncPos Pos
+	Pkg              *packages.Package
 	// The position of the locks call
 	Pos token.Pos
+}
+
+type LockPair string
+
+func NewLockPair(rt1, rt2 string) LockPair {
+	return LockPair(rt1 + "->" + rt2)
+}
+
+func (lp LockPair) Reverse() LockPair {
+	segs := strings.Split(string(lp), "->")
+	return NewLockPair(segs[1], segs[0])
+}
+
+type LockPairRecord map[LockPair]Poses
+
+func NewLockPairRecord(locksites Locksites) LockPairRecord {
+	result := LockPairRecord{}
+	for fdecl, locks := range locksites {
+		for i := 0; i < len(locks)-1; i++ {
+			for j := i + 1; j < len(locks); j++ {
+				lp := NewLockPair(locks[i].ResourceType, locks[j].ResourceType)
+				if _, ok := result[lp]; !ok {
+					result[lp] = Poses{}
+				}
+				result[lp] = append(result[lp], fdecl)
+			}
+		}
+	}
+
+	// Sort the fdecl positions
+	for lp, poses := range result {
+		sort.Sort(poses)
+		result[lp] = poses
+	}
+	return result
 }
 
 func main() {
@@ -122,10 +167,10 @@ func main() {
 				}
 
 				site := Locksite{
-					ResourceType:  resType,
-					Pkg:           pkg,
-					EnclosingFunc: enclosingFuncDecl,
-					Pos:           callExpr.Pos(),
+					ResourceType:     resType,
+					Pkg:              pkg,
+					EnclosingFuncPos: Pos(pkg.Fset.Position(enclosingFuncDecl.Pos()).String()),
+					Pos:              callExpr.Pos(),
 				}
 				locks.AddLocksite(site)
 
@@ -134,11 +179,48 @@ func main() {
 		}
 	}
 
-	for enclosingFunc, _locks := range locks {
-		for _, lock := range _locks {
-			fmt.Printf("%v: %s\n", lock.Pkg.Fset.Position(enclosingFunc.Pos()).String(), lock.ResourceType)
-		}
+	lpr := NewLockPairRecord(locks)
+	keys := []string{}
+	for lp := range lpr {
+		keys = append(keys, string(lp))
 	}
+	sort.Strings(keys)
+
+	processed := map[LockPair]bool{}
+	messages := []string{}
+	for _, key := range keys {
+		lp := LockPair(key)
+		if processed[lp] {
+			continue
+		}
+		processed[lp] = true
+
+		pos1s := lpr[lp]
+		pos2s, ok := lpr[lp.Reverse()]
+		if !ok {
+			continue
+		}
+		processed[lp.Reverse()] = true
+
+		var pos1msg, pos2msg []string
+		for _, pos := range pos1s {
+			pos1msg = append(pos1msg, "\t- "+string(pos))
+		}
+		for _, pos := range pos2s {
+			pos2msg = append(pos2msg, "\t- "+string(pos))
+		}
+
+		msg := fmt.Sprintf(`Potential deadlock:
+  %s:
+%s
+  %s:
+%s
+`, lp, strings.Join(pos1msg, "\n"), lp.Reverse(), strings.Join(pos2msg, "\n"))
+
+		messages = append(messages, msg)
+	}
+
+	fmt.Println(strings.Join(messages, "\n"))
 }
 
 func isLocksCallExpr(e ast.Expr, info *types.Info) bool {
