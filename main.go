@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,6 +122,7 @@ func main() {
 
 	// Collect lock call expressions in the same scope, in order
 	locks := Locksites{}
+	pwd, _ := os.Getwd()
 	for _, pkg := range pkgs {
 		for _, f := range pkg.Syntax {
 			ast.Inspect(f, func(node ast.Node) bool {
@@ -169,7 +171,7 @@ func main() {
 				site := Locksite{
 					ResourceType:     resType,
 					Pkg:              pkg,
-					EnclosingFuncPos: Pos(pkg.Fset.Position(enclosingFuncDecl.Pos()).String()),
+					EnclosingFuncPos: Pos(strings.TrimPrefix(pkg.Fset.Position(enclosingFuncDecl.Pos()).String(), pwd+string(filepath.Separator))),
 					Pos:              callExpr.Pos(),
 				}
 				locks.AddLocksite(site)
