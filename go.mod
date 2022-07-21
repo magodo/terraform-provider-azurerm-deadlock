@@ -1,6 +1,6 @@
 module github.com/magodo/terraform-provider-azurerm-deadlock
 
-go 1.17
+go 1.18
 
 require (
 	github.com/bflad/tfproviderlint v0.28.1
